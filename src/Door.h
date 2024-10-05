@@ -1,8 +1,11 @@
-#define PIN_MOTOR_UP D1
-#define PIN_MOTOR_DOWN D2
-#define PIN_IR_SENSOR D5
-#define PIN_MAGNET_SENSOR_TOP D6
-#define PIN_MAGNET_SENSOR_BOTTOM D7
+#include <Arduino.h>
+#include "common.h"
+
+#define PIN_MOTOR_UP 5
+#define PIN_MOTOR_DOWN 4
+#define PIN_IR_SENSOR 14
+#define PIN_MAGNET_SENSOR_TOP 12
+#define PIN_MAGNET_SENSOR_BOTTOM 13
 
 #define OBSTRUCTION_DELAY 45000
 #define SENSOR_READ_DELAY 50
@@ -11,77 +14,68 @@ int topSensorValue = LOW;
 int bottomSensorValue = LOW;
 int irSensorValue = LOW;
 
-void ledOff() {
-  digitalWrite(LED_BUILTIN, HIGH);
-}
+void SetPinModes()
+{
+  pinMode(PIN_MOTOR_UP, OUTPUT);
+  pinMode(PIN_MOTOR_DOWN, OUTPUT);
+  pinMode(LED_BUILTIN, OUTPUT);
 
-void ledOn() {
-  digitalWrite(LED_BUILTIN, LOW);
-}
-
-
-void blink(int times) {
-  for(int i=0; i<times; i++) {
-    ledOn();
-    delay(200);
-    ledOff();
-    delay(200);
-  }
-}
-
-void blinkFast(int times) {
-  for(int i=0; i<times; i++) {
-    ledOn();
-    delay(100);
-    ledOff();
-    delay(100);
-  }
+  pinMode(PIN_IR_SENSOR, INPUT_PULLUP);
+  pinMode(PIN_MAGNET_SENSOR_TOP, INPUT_PULLUP);
+  pinMode(PIN_MAGNET_SENSOR_BOTTOM, INPUT_PULLUP);
 }
 
 // Low-level sensor reading:
-bool isDoorFullyClosed() {
+bool IsDoorFullyClosed()
+{
   bottomSensorValue = digitalRead(PIN_MAGNET_SENSOR_BOTTOM);
-  Serial.print("doorFullyClosed: ");
-  Serial.println(bottomSensorValue == LOW);
   return bottomSensorValue == LOW;
 }
 
-bool isDoorFullyOpen() {
+bool IsDoorFullyOpen()
+{
   topSensorValue = digitalRead(PIN_MAGNET_SENSOR_TOP);
-  Serial.print("doorFullyOpen: ");
-  Serial.println(topSensorValue == LOW);
   return topSensorValue == LOW;
 }
 
-bool isDoorObstructed() {
+bool IsDoorObstructed()
+{
   irSensorValue = digitalRead(PIN_IR_SENSOR);
-  Serial.print("doorObstructed: ");
-  Serial.println(irSensorValue == HIGH);
   return irSensorValue == HIGH;
 }
 
 // Low-level motor operation
-void doorUp() {
+void doorUp()
+{
   Serial.println("doorUp");
   digitalWrite(PIN_MOTOR_DOWN, LOW);
   digitalWrite(PIN_MOTOR_UP, HIGH);
 }
-void doorDown() {
+void doorDown()
+{
   Serial.println("doorDown");
   digitalWrite(PIN_MOTOR_UP, LOW);
   digitalWrite(PIN_MOTOR_DOWN, HIGH);
 }
-void doorStop() {
+void doorStop()
+{
   Serial.println("doorStop");
   digitalWrite(PIN_MOTOR_UP, LOW);
   digitalWrite(PIN_MOTOR_DOWN, LOW);
 }
 
-void openDoor() {
+void OpenDoor()
+{
   blink(2);
+  if (IsDoorFullyOpen())
+  {
+    return;
+  }
   doorUp();
-  for (;;) {
-    if (isDoorFullyOpen()) {
+  for (;;)
+  {
+    if (IsDoorFullyOpen())
+    {
       break;
     }
     delay(SENSOR_READ_DELAY);
@@ -90,19 +84,27 @@ void openDoor() {
 }
 
 // Logic
-void closeDoor() {
+void CloseDoor()
+{
   blink(3);
+  if (IsDoorFullyClosed())
+  {
+    return;
+  }
   doorDown();
-  for (;;) {
-    if (isDoorFullyClosed()) {
+  for (;;)
+  {
+    if (IsDoorFullyClosed())
+    {
       break;
     }
 
-    if (isDoorObstructed()) {
+    if (IsDoorObstructed())
+    {
       blinkFast(5);
       doorStop();
       delay(200);
-      openDoor();
+      OpenDoor();
       delay(OBSTRUCTION_DELAY);
       doorDown();
       continue;
@@ -112,36 +114,47 @@ void closeDoor() {
   doorStop();
 }
 
-void debugSensors() {
+void TebugSensors()
+{
   ledOff();
-  for (;;) {
-    bool closed = isDoorFullyClosed();
-    bool open = isDoorFullyOpen();
-    bool obstructed = isDoorObstructed();
+  for (;;)
+  {
+    bool closed = IsDoorFullyClosed();
+    bool open = IsDoorFullyOpen();
+    bool obstructed = IsDoorObstructed();
     Serial.print("IR: ");
     Serial.println(obstructed);
     Serial.print("OPEN: ");
     Serial.println(open);
     Serial.print("CLOSED: ");
     Serial.println(closed);
-    if (open) {
+    if (open)
+    {
       blink(1);
       delay(1000);
-    } else if (closed) {
+    }
+    else if (closed)
+    {
       blink(2);
       delay(1000);
-    } else if (obstructed) {
+    }
+    else if (obstructed)
+    {
       blink(3);
       delay(1000);
-    } else {
+    }
+    else
+    {
       delay(SENSOR_READ_DELAY);
     }
     Serial.println();
   }
 }
 
-void testMotors() {
-  for (;;) {
+void TestMotors()
+{
+  for (;;)
+  {
     ledOn();
     doorUp();
     delay(1000);
