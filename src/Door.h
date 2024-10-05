@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include "common.h"
 
+#ifndef PITES_DOOR_H_
+#define PITES_DOOR_H_
+
 #define PIN_MOTOR_UP 5
 #define PIN_MOTOR_DOWN 4
 #define PIN_IR_SENSOR 14
@@ -170,3 +173,5 @@ void TestMotors()
     delay(1000);
   }
 }
+
+#endif

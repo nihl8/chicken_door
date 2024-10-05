@@ -1,9 +1,7 @@
 #include <Arduino.h>
 
-#ifndef COMMON_FUNCTIONS_H_
-#define COMMON_FUNCTIONS_H_
-
-#define LED_BUILTIN 4
+#ifndef PITES_COMMON_FUNCTIONS_H_
+#define PITES_COMMON_FUNCTIONS_H_
 
 void ledOff() {
   digitalWrite(LED_BUILTIN, HIGH);

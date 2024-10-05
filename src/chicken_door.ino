@@ -4,22 +4,23 @@
 #include <PubSubClient.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
+#include <ArduinoJson.h>
+#include <EEPROM.h>
 
 #include "common.h"
 #include "config.h"
 #include "door.h"
+#include "sunrise.h"
 
 #define CERT mqtt_broker_cert
 #define MSG_BUFFER_SIZE (50)
 char msg[MSG_BUFFER_SIZE];
 
-//--------------------------------------
-// config (edit here before compiling)
-//--------------------------------------
-#define MQTT_TLS // uncomment this define to enable TLS transport
+#define _USE_EEPROM
 
 const char *mqtt_topic_config_open = "pites-cfg-open";
 const char *mqtt_topic_config_close = "pites-cfg-close";
+const char *mqtt_topic_follow_the_sun = "pites-cfg-fts";
 const char *mqtt_topic_action_open = "pites-act-open";
 const char *mqtt_topic_action_close = "pites-act-close";
 const char *mqtt_topic_status = "pites-status";
@@ -31,22 +32,27 @@ char *closing_label = "closing";
 
 bool doorIsClosed;
 
-#ifdef MQTT_TLS
 WiFiClientSecure wifiClient;
-#else
-WiFiClient wifiClient;
-#endif
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "es.pool.ntp.org", 7200, 300);
 PubSubClient mqttClient(wifiClient);
 
+unsigned long currentEpoch;
 unsigned long lastStatusUpdateTime;
-unsigned int openTime[2];
-unsigned int closeTime[2];
+unsigned long lastSunriseUpdateTime;
+// times
+unsigned int openTime = 0;
+unsigned int closeTime = 0;
+unsigned int sunsetTime = 0;
+unsigned int sunriseTime = 0;
+// other config
+unsigned int followTheSun = 1;
+
+#define EEPROM_SIZE 12
 
 void wifiSetup()
 {
-  WiFi.begin(ssid, password);
+  WiFi.begin(cfg_wifi_ssid, cfg_wifi_password);
   while (WiFi.status() != WL_CONNECTED)
   {
     delay(500);
@@ -60,20 +66,17 @@ void wifiSetup()
     blinkFast(3);
     Serial.println("");
     Serial.print("Connected to #");
-    Serial.print(ssid);
+    Serial.print(cfg_wifi_ssid);
     Serial.print("# IP address: ");
     Serial.println(WiFi.localIP());
   }
 
   timeClient.begin();
 
-#ifdef MQTT_TLS
-  configTime(0, 0, "pool.ntp.org");
-  X509List *cert = new X509List(mqtt_ca_cert);
-  wifiClient.setTrustAnchors(cert);
-#else
-  wifiClient.setInsecure();
-#endif
+  configTime(0, 0, "es.pool.ntp.org");
+  X509List *certs = new X509List(mqtt_ca_cert);
+  certs->append(sunset_api_ca_cert);
+  wifiClient.setTrustAnchors(certs);
 
   Serial.println("WiFi connected");
 }
@@ -81,19 +84,18 @@ void wifiSetup()
 char clientID[11];
 void mqttInit()
 {
-  sprintf(clientID, "pites-%x", random(0xffff)); // Create a random client ID
-  mqttClient.setServer(mqtt_server, mqtt_server_port);
+  sprintf(clientID, "pites-%lx", random(0xffff)); // Create a random client ID
+  mqttClient.setServer(cfg_mqtt_server, cfg_mqtt_server_port);
   mqttClient.setCallback(mqttCallback);
 }
 
 void mqttReconnect()
 {
-  // Loop until we're reconnected
   while (!mqttClient.connected())
   {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-    if (mqttClient.connect(clientID, mqtt_username, mqtt_password))
+    if (mqttClient.connect(clientID, cfg_mqtt_username, cfg_mqtt_password))
     {
       Serial.println("connected");
 
@@ -101,6 +103,7 @@ void mqttReconnect()
       mqttClient.subscribe(mqtt_topic_config_close);
       mqttClient.subscribe(mqtt_topic_action_open);
       mqttClient.subscribe(mqtt_topic_action_close);
+      mqttClient.subscribe(mqtt_topic_follow_the_sun);
     }
     else
     {
@@ -139,9 +142,8 @@ void parseIncomingDate(char *payload, unsigned int length, unsigned int *output,
 
   unsigned int hour, minute;
   sscanf(payload, "%2d:%2d", &hour, &minute);
-  output[0] = hour;
-  output[1] = minute;
-  Serial.printf("Set %s time to %02u:%02u\n", openingOrClosing, hour, minute);
+  *output = hour * 100 + minute;
+  Serial.printf("Set %s time to %04u\n", openingOrClosing, *output);
 }
 
 char incomingMessagePayload[1024];
@@ -159,29 +161,44 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
 
   if (strcmp(topic, mqtt_topic_config_open) == 0)
   {
-    parseIncomingDate(incomingMessagePayload, length, openTime, opening_label);
+    parseIncomingDate(incomingMessagePayload, length, &openTime, opening_label);
+    followTheSun = 0;
   }
   else if (strcmp(topic, mqtt_topic_config_close) == 0)
   {
-    parseIncomingDate(incomingMessagePayload, length, closeTime, closing_label);
+    parseIncomingDate(incomingMessagePayload, length, &closeTime, closing_label);
+    followTheSun = 0;
   }
   else if (strcmp(topic, mqtt_topic_action_open) == 0)
   {
     openTheDoor();
   }
+  else if (strcmp(topic, mqtt_topic_follow_the_sun) == 0)
+  {
+    if(strncmp("1", incomingMessagePayload, length)) {
+      followTheSun = 1;
+      lastStatusUpdateTime = 0; // Reset to force update on next loop
+    } else {
+      followTheSun = 0;
+    }
+  }
   else if (strcmp(topic, mqtt_topic_action_close) == 0)
   {
     closeTheDoor;
   }
-  // sendDoorStatus();
+  sendDoorStatus();
 }
 
 void mqttPublish(const char *topic, char *payload, boolean retained)
 {
   if (mqttClient.publish(topic, payload, true))
   {
-    Serial.printf("Message publised [%s]: %s\n", topic, payload);
+    Serial.printf("Message published [%s]: %s\n", topic, payload);
   }
+}
+
+void loadConfigFromEEPROM() {
+
 }
 
 void setup()
@@ -198,66 +215,91 @@ void setup()
 
   doorIsClosed = IsDoorFullyClosed();
 
+  #ifdef _USE_EEPROM
+  // EEPROM.begin(EEPROM_SIZE);
+  loadConfigFromEEPROM();
+  #endif
+
   wifiSetup();
   mqttInit();
 }
 
-char status[1024];
+// void formatTime(unsigned int timeInt, char* out) {
+//   sprintf(out, "%02d:%02d", timeInt/100, timeInt%100);
+// }
+
+unsigned int currentTime()
+{
+  return timeClient.getHours() * 100 + timeClient.getMinutes();
+}
+
 void sendDoorStatus()
 {
-  sprintf(status,
-          "{\"open\": %d,\"closed\": %d,\"obstructed\": %d, \"opensAt\": \"%02d:%02d\", \"closesAt\": \"%02d:%02d\", currentTime: \"%02d:%02d\"}",
-          IsDoorFullyOpen(),
-          IsDoorFullyClosed(),
-          IsDoorObstructed(),
-          openTime[0],
-          openTime[1],
-          closeTime[0],
-          closeTime[1],
-          timeClient.getHours(),
-          timeClient.getMinutes());
+  char status[1024];
+  JsonDocument doc;
+  doc["open"] = IsDoorFullyOpen();
+  doc["closed"] = IsDoorFullyClosed();
+  doc["obstructed"] = IsDoorObstructed();
+  doc["opensAt"] = openTime;
+  doc["closesAt"] = closeTime;
+  doc["currentTime"] = currentTime();
+  doc["sunset"] = sunriseTime;
+  doc["sunrise"] = sunsetTime;
+  doc["followTheSun"] = followTheSun;
+  serializeJson(doc, status, 1024);
 
   mqttPublish(mqtt_topic_status, status, true);
   lastStatusUpdateTime = timeClient.getEpochTime();
 }
 
-unsigned int currentHour, currentMinute;
-void loop()
+void updateSunriseSunsetTime()
 {
-  //TODO:
-  // - Use epoch times, and 
-  // - Persist config
-  //    https ://stackoverflow.com/questions/32616153/making-variables-persistent-after-a-restart-on-nodemcu
-  //
-  // - Deep sleep 
-  //    Deep sleep mode for 30 seconds, the ESP8266 wakes up by itself when GPIO 16 (D0 in NodeMCU board) is connected to the RESET pin
-  //    Serial.println("I'm awake, but I'm going into deep sleep mode for 30 seconds");
-  //    ESP.deepSleep(30e6);
-
-  if (lastStatusUpdateTime == 0 || timeClient.getEpochTime() - lastStatusUpdateTime >= 10)
+  lastSunriseUpdateTime = currentEpoch;
+  if (QuerySunriseAndSunset(wifiClient, cfg_geo_lat, cfg_geo_lon, &sunriseTime, &sunsetTime) != 0)
   {
-    sendDoorStatus();
-  }
-  currentHour = timeClient.getHours();
-  currentMinute = timeClient.getMinutes();
-/*  if (doorIsClosed)
-  {
-    if (currentHour > openTime[0] || currentHour == openTime[0] && currentMinute >= openTime[1])
-    {
-      OpenDoor();
-    }
+    Serial.println("Error: Could not update sunrise/sunset");
   }
   else
   {
-    if (currentHour > openTime[0] || currentHour == openTime[0] && currentMinute >= openTime[1])
-    {
-      OpenDoor();
-    }
+    Serial.printf("New sunrise: %04d, sunset: %04d\n", sunriseTime, sunsetTime);
   }
-*/
-  if (closeTime == 0 || timeClient.getEpochTime() - lastStatusUpdateTime >= 10)
+}
+
+void loop()
+{
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("WARN: Not connected to wifi");
+  }
+
+  // TODO:
+  //  - Use epoch times
+  //  - EEPROM persist every week
+  //     https://www.aranacorp.com/en/using-the-eeprom-with-the-esp8266/
+  //
+  //  - Deep sleep
+  //     Deep sleep mode for 30 seconds, the ESP8266 wakes up by itself when GPIO 16 (D0 in NodeMCU board) is connected to the RESET pin
+  //     Serial.println("I'm awake, but I'm going into deep sleep mode for 30 seconds");
+  //     ESP.deepSleep(30e6);
+
+  currentEpoch = timeClient.getEpochTime();
+  if (followTheSun == 1 && (lastSunriseUpdateTime == 0 || currentEpoch - lastSunriseUpdateTime >= 10))
+  {
+    updateSunriseSunsetTime();
+  }
+  if (lastStatusUpdateTime == 0 || currentEpoch - lastStatusUpdateTime >= 10)
   {
     sendDoorStatus();
+  }
+
+  unsigned int now = currentTime();
+  if (doorIsClosed && openTime > 0 && now >= openTime)
+  {
+    openTheDoor();
+  }
+  else if (!doorIsClosed && closeTime > 0 && now >= closeTime)
+  {
+    closeTheDoor();
   }
 
   delay(500);

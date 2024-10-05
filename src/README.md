@@ -1,3 +1,7 @@
+# debugging:
+
+`pio device monitor -p COM3 -b 74880 -f esp8266_exception_decoder`
+
 # setup
 create config.h and fill in credentials:
 
