@@ -117,7 +117,7 @@ void CloseDoor()
   doorStop();
 }
 
-void TebugSensors()
+void DebugSensors()
 {
   ledOff();
   for (;;)

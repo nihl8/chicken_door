@@ -3,10 +3,10 @@
 #include <ESP8266WiFi.h>
 #include <ArduinoJson.h>
 
-const char *sunrise_api_fmt = "https://api.sunrisesunset.io/json?lat=%s&lng=%s&time_format=24";
+const char *sunrise_api_fmt = "https://api.sunrisesunset.io/json?lat=%s&lng=%s&time_format=24&timezone=UTC";
 
 char sunrise_api_url[100] = "";
-char *setSunriseURL(char *geo_latitude, char *geo_longitude)
+char *setSunriseURL(const char *geo_latitude, const char *geo_longitude)
 {
     sprintf(sunrise_api_url, sunrise_api_fmt, geo_latitude, geo_longitude);
     return sunrise_api_url;
@@ -24,14 +24,13 @@ unsigned int parseSunriseHourAndMinuteFromHMS(const char *time)
 
 int extractSunriseSunsetFromResponse(String responseBody, unsigned int *sunrise, unsigned int *sunset)
 {
-    char sunriseTime[9], sunsetTime[9];
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, responseBody);
 
     // Test if parsing succeeds.
     if (error)
     {
-        Serial.printf("[SUNRISESET] deserializeJson() failed: %s\n", error.f_str());
+        Serial.printf("[SUNRISE] deserializeJson() failed: %s\n", error.c_str());
         return 3;
     }
 
@@ -42,7 +41,7 @@ int extractSunriseSunsetFromResponse(String responseBody, unsigned int *sunrise,
     int sunsetInt = parseSunriseHourAndMinuteFromHMS(sunsetText);
     if (sunriseInt == 0 || sunsetInt == 0)
     {
-        Serial.printf("[SUNRISESET] Failure parsing sunrise (%s) or sunset (%s) time...\n", sunriseText, sunsetText);
+        Serial.printf("[SUNRISE] Failure parsing sunrise (%s) or sunset (%s) time...\n", sunriseText, sunsetText);
         return 4;
     }
     *sunrise = sunriseInt;
@@ -50,19 +49,19 @@ int extractSunriseSunsetFromResponse(String responseBody, unsigned int *sunrise,
     return 0;
 }
 
-int QuerySunriseAndSunset(WiFiClientSecure wifiClient, char *geo_latitude, char *geo_longitude, unsigned int *sunriseOut, unsigned int *sunsetOut)
+int QuerySunriseAndSunset(WiFiClientSecure wifiClient, const char *geo_latitude, const char *geo_longitude, unsigned int *sunriseOut, unsigned int *sunsetOut)
 {
     HTTPClient https;
     setSunriseURL(geo_latitude, geo_longitude);
 
     // Initializing an HTTPS communication using the secure client
-    Serial.printf("[SUNRISESET] Querying sunrise API: %s\n", sunrise_api_url);
+    Serial.printf("[SUNRISE] Querying sunrise API: %s\n", sunrise_api_url);
     if (https.begin(wifiClient, sunrise_api_url))
     { // HTTPS
         int httpCode = https.GET();
         if (httpCode > 0)
         {
-            Serial.printf("[SUNRISESET] HTTP response code: %d\n", httpCode);
+            Serial.printf("[SUNRISE] HTTP response code: %d\n", httpCode);
             if (httpCode == HTTP_CODE_OK)
             {
                 String payload = https.getString();
@@ -72,7 +71,7 @@ int QuerySunriseAndSunset(WiFiClientSecure wifiClient, char *geo_latitude, char 
         }
         else
         {
-            Serial.printf("[SUNRISESET] GET... failed, error: %s\n", https.errorToString(httpCode).c_str());
+            Serial.printf("[SUNRISE] GET... failed, error: %s\n", https.errorToString(httpCode).c_str());
             return 2;
         }
 
@@ -80,7 +79,7 @@ int QuerySunriseAndSunset(WiFiClientSecure wifiClient, char *geo_latitude, char 
     }
     else
     {
-        Serial.printf("[SUNRISESET] Unable to connect\n");
+        Serial.printf("[SUNRISE] Unable to connect\n");
         return 1;
     }
     return 0;

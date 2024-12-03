@@ -15,9 +15,9 @@ void ledOn() {
 void blink(int times) {
   for(int i=0; i<times; i++) {
     ledOn();
-    delay(200);
+    delay(500);
     ledOff();
-    delay(200);
+    delay(500);
   }
 }
 
