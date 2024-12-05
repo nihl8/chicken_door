@@ -28,18 +28,20 @@ const char *mqtt_topic_config_open = "cfg-open";
 const char *mqtt_topic_config_close = "cfg-close";
 const char *mqtt_topic_config_follow_the_sun = "cfg-fts";
 const char *mqtt_topic_config_save = "cfg-save";
-const char *mqtt_topic_action_open = "open";
-const char *mqtt_topic_action_close = "close";
+const char *mqtt_topic_action_operate = "operate";
+
 const char *mqtt_topic_status = "status";
-const char *mqtt_topic_status_opened = "opened";
-const char *mqtt_topic_status_closed = "closed";
+const char *mqtt_topic_status_movement = "movement";
 const char *mqtt_topic_error = "error";
 
 const char *opening_label = "opening";
 const char *closing_label = "closing";
 
-const char *opened_label = "opened";
-const char *closed_label = "closed";
+const char *opened_action_message = "{\"action\":\"opened\"}";
+const char *closed_action_message = "{\"action\":\"closed\"}";
+
+const char *open_label = "open";
+const char *close_label = "close";
 
 bool doorIsClosed;
 bool wasClosedManually = false;
@@ -141,8 +143,7 @@ bool mqttReconnect()
 
       mqttClient.subscribe(mqtt_topic_config_open);
       mqttClient.subscribe(mqtt_topic_config_close);
-      mqttClient.subscribe(mqtt_topic_action_open);
-      mqttClient.subscribe(mqtt_topic_action_close);
+      mqttClient.subscribe(mqtt_topic_action_operate);
       mqttClient.subscribe(mqtt_topic_config_follow_the_sun);
       mqttClient.subscribe(mqtt_topic_config_save);
       return true;
@@ -163,7 +164,7 @@ void openTheDoor()
   Serial.println("Open sesame");
   OpenDoor();
   doorIsClosed = false;
-  publishEventMessage(mqtt_topic_status_opened, opened_label);
+  publishEventMessage(mqtt_topic_status_movement, opened_action_message);
 }
 
 void closeTheDoor()
@@ -171,7 +172,7 @@ void closeTheDoor()
   Serial.println("Close sesame");
   CloseDoor();
   doorIsClosed = true;
-  publishEventMessage(mqtt_topic_status_closed, closed_label);
+  publishEventMessage(mqtt_topic_status_movement, closed_action_message);
 }
 
 void parseIncomingDate(char *payload, unsigned int length, unsigned int *output, const char *openingOrClosing)
@@ -212,27 +213,27 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     parseIncomingDate(incomingMessagePayload, length, &closeTime, closing_label);
     followTheSun = 0;
   }
-  else if (strcmp(topic, mqtt_topic_action_open) == 0)
+  else if (strcmp(topic, mqtt_topic_action_operate) == 0)
   {
-    openTheDoor();
-    wasOpenedManually = true;
-    wasClosedManually = false;
-  }
-  else if (strcmp(topic, mqtt_topic_action_close) == 0)
-  {
-    closeTheDoor();
-    wasClosedManually = true;
-    wasOpenedManually = false;
+    if(strncmp("{\"action\":\"open\"}", incomingMessagePayload, length) == 0) {
+      openTheDoor();
+      wasOpenedManually = true;
+      wasClosedManually = false;
+    } else if (strncmp("{\"action\":\"close\"}", incomingMessagePayload, length) == 0) {
+      closeTheDoor();
+      wasClosedManually = true;
+      wasOpenedManually = false;
+    }
   }
   else if (strcmp(topic, mqtt_topic_config_follow_the_sun) == 0)
   {
-    if (strncmp("1", incomingMessagePayload, length))
+    if (strncmp("{\"follow\":1}", incomingMessagePayload, length) == 0)
     {
       followTheSun = 1;
       lastSunriseUpdateTime = 0;
       lastStatusUpdateTime = 0; // Reset to force update on next loop
     }
-    else
+    else if (strncmp("{\"follow\":0}", incomingMessagePayload, length) == 0)
     {
       followTheSun = 0;
     }
@@ -393,7 +394,7 @@ void sendDoorStatus()
   doc["followTheSun"] = followTheSun;
   doc["sunrise"] = fmtSunriseTime;
   doc["sunset"] = fmtSunsetTime;
-  doc["closed"] = doorIsClosed;
+  doc["status"] = doorIsClosed ? close_label : open_label;
   doc["obstructed"] = IsDoorObstructed();
   serializeJson(doc, status, 1024);
 
@@ -471,7 +472,7 @@ void mainLogic()
     sendDoorStatus();
   }
 
-  delay(500);
+  delay(2000);
 
   if (!mqttClient.connected())
   {
