@@ -12,22 +12,25 @@ void ledOn() {
 }
 
 
-void blink(int times) {
+void blinkSpecificDelay(int times, int delayMs) {
   for(int i=0; i<times; i++) {
     ledOn();
-    delay(500);
+    delay(delayMs);
     ledOff();
-    delay(500);
+    delay(delayMs);
   }
 }
 
+void blink(int times) {
+  blinkSpecificDelay(times, 500);
+}
+
 void blinkFast(int times) {
-  for(int i=0; i<times; i++) {
-    ledOn();
-    delay(100);
-    ledOff();
-    delay(100);
-  }
+  blinkSpecificDelay(times, 100);
+}
+
+void blinkVeryFast(int times) {
+  blinkSpecificDelay(times, 50);
 }
 
 #endif

@@ -104,7 +104,6 @@ void CloseDoor()
 
     if (IsDoorObstructed())
     {
-      blinkFast(5);
       doorStop();
       delay(200);
       OpenDoor();

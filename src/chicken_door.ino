@@ -1,6 +1,7 @@
 // Thanks to https://github.com/aschiffler/esp8266-mqtt-node
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
+#include <ArduinoOTA.h>
 #include <PubSubClient.h>
 
 // Dangerous bug, don't use: https://github.com/arduino-libraries/NTPClient/issues/105
@@ -23,15 +24,16 @@ char msg[MSG_BUFFER_SIZE];
 
 #define _USE_EEPROM
 
-const char *mqtt_topic_config_open = "pites-cfg-open";
-const char *mqtt_topic_config_close = "pites-cfg-close";
-const char *mqtt_topic_config_follow_the_sun = "pites-cfg-fts";
-const char *mqtt_topic_config_save = "pites-cfg-save";
-const char *mqtt_topic_action_open = "pites-act-open";
-const char *mqtt_topic_action_close = "pites-act-close";
-const char *mqtt_topic_status = "pites-status";
-const char *mqtt_topic_status_opened = "pites-opened";
-const char *mqtt_topic_status_closed = "pites-closed";
+const char *mqtt_topic_config_open = "cfg-open";
+const char *mqtt_topic_config_close = "cfg-close";
+const char *mqtt_topic_config_follow_the_sun = "cfg-fts";
+const char *mqtt_topic_config_save = "cfg-save";
+const char *mqtt_topic_action_open = "open";
+const char *mqtt_topic_action_close = "close";
+const char *mqtt_topic_status = "status";
+const char *mqtt_topic_status_opened = "opened";
+const char *mqtt_topic_status_closed = "closed";
+const char *mqtt_topic_error = "error";
 
 const char *opening_label = "opening";
 const char *closing_label = "closing";
@@ -40,19 +42,25 @@ const char *opened_label = "opened";
 const char *closed_label = "closed";
 
 bool doorIsClosed;
+bool wasClosedManually = false;
+bool wasOpenedManually = false;
 
 WiFiClientSecure wifiClient;
 WiFiUDP ntpUDP;
 
-timeval tv;
 time_t now;
-struct tm * timeinfo;
+struct tm *timeinfo;
 
 PubSubClient mqttClient(wifiClient);
 
 unsigned long currentEpoch;
 unsigned long lastStatusUpdateTime;
 unsigned long lastSunriseUpdateTime;
+
+// Update intervals
+unsigned int update_interval_sunrise = 7200;
+unsigned int update_interval_status = 60;
+
 // persistant config
 unsigned int openTime = 0;
 unsigned int closeTime = 0;
@@ -61,6 +69,24 @@ unsigned int sunriseTime = 0;
 unsigned int followTheSun = 1;
 
 #define EEPROM_SIZE 12
+
+void timeSetup()
+{
+  configTime(0, 0, "es.pool.ntp.org");
+  Serial.println("\nWaiting for time");
+  while (true)
+  {
+    readTime();
+    if (now > 170000000)
+    { // Circa 1975
+      break;
+    }
+    Serial.print("-");
+    delay(1000);
+  }
+  Serial.println();
+  printTime();
+}
 
 void wifiSetup()
 {
@@ -137,7 +163,7 @@ void openTheDoor()
   Serial.println("Open sesame");
   OpenDoor();
   doorIsClosed = false;
-  mqttPublish(mqtt_topic_status_opened, strdup(opened_label), false);
+  publishEventMessage(mqtt_topic_status_opened, opened_label);
 }
 
 void closeTheDoor()
@@ -145,7 +171,7 @@ void closeTheDoor()
   Serial.println("Close sesame");
   CloseDoor();
   doorIsClosed = true;
-  mqttPublish(mqtt_topic_status_closed, strdup(closed_label), false);
+  publishEventMessage(mqtt_topic_status_closed, closed_label);
 }
 
 void parseIncomingDate(char *payload, unsigned int length, unsigned int *output, const char *openingOrClosing)
@@ -189,12 +215,21 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   else if (strcmp(topic, mqtt_topic_action_open) == 0)
   {
     openTheDoor();
+    wasOpenedManually = true;
+    wasClosedManually = false;
+  }
+  else if (strcmp(topic, mqtt_topic_action_close) == 0)
+  {
+    closeTheDoor();
+    wasClosedManually = true;
+    wasOpenedManually = false;
   }
   else if (strcmp(topic, mqtt_topic_config_follow_the_sun) == 0)
   {
     if (strncmp("1", incomingMessagePayload, length))
     {
       followTheSun = 1;
+      lastSunriseUpdateTime = 0;
       lastStatusUpdateTime = 0; // Reset to force update on next loop
     }
     else
@@ -206,11 +241,37 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   {
     saveConfigToEEPROM();
   }
-  else if (strcmp(topic, mqtt_topic_action_close) == 0)
-  {
-    closeTheDoor();
-  }
   sendDoorStatus();
+}
+
+void publishEventMessage(const char *topic, const char *action)
+{
+  char status[1024];
+  JsonDocument doc;
+
+  char fmtCurrentTime[6] = "";
+
+  formatTime(currentTime(), fmtCurrentTime);
+
+  doc["currentTime"] = fmtCurrentTime;
+  doc["action"] = action;
+  serializeJson(doc, status, 1024);
+  mqttPublish(topic, status, false);
+}
+
+void publishErrorMessage(const char *topic, const char *error)
+{
+  char status[1024];
+  JsonDocument doc;
+
+  char fmtCurrentTime[6] = "";
+
+  formatTime(currentTime(), fmtCurrentTime);
+
+  doc["currentTime"] = fmtCurrentTime;
+  doc["error"] = error;
+  serializeJson(doc, status, 1024);
+  mqttPublish(topic, status, false);
 }
 
 void mqttPublish(const char *topic, char *payload, boolean retained)
@@ -288,16 +349,19 @@ void setup()
   EEPROM.begin(EEPROM_SIZE);
   loadConfigFromEEPROM();
 
-  configTime(0, 0, "es.pool.ntp.org");
-
   wifiSetup();
+  timeSetup();
+
+  ArduinoOTA.setHostname(cfg_ota_hostname);
+  ArduinoOTA.setPassword(cfg_ota_password);
+  ArduinoOTA.begin();
+
   mqttInit();
 }
 
 unsigned int currentTime()
 {
-  time(&now);
-  timeinfo = localtime(&now);
+  readTime();
   return timeinfo->tm_hour * 100 + timeinfo->tm_min;
 }
 
@@ -340,9 +404,13 @@ void sendDoorStatus()
 void updateSunriseSunsetTime()
 {
   lastSunriseUpdateTime = currentEpoch;
+  Serial.print("lastSunriseUpdateTime: ");
+  Serial.println(lastSunriseUpdateTime);
+
   if (QuerySunriseAndSunset(wifiClient, cfg_geo_lat, cfg_geo_lon, &sunriseTime, &sunsetTime) != 0)
   {
     Serial.println("[SUNRISE] Error: Could not update sunrise/sunset");
+    publishErrorMessage(mqtt_topic_error, "Could not update sunrise/sunset");
   }
   else
   {
@@ -350,9 +418,10 @@ void updateSunriseSunsetTime()
   }
 }
 
-long getEpochTime() {
-  return gettimeofday(&tv, nullptr);
-  return tv.tv_sec;
+long getEpochTime()
+{
+  readTime();
+  return now;
 }
 
 void mainLogic()
@@ -360,21 +429,10 @@ void mainLogic()
   if (WiFi.status() != WL_CONNECTED)
   {
     Serial.println("WARN: Not connected to wifi");
-    blink(1);
   }
-  // else
-  // {
-  //   blinkFast(2);
-  // }
-
-  // TODO:
-  //  - Deep sleep
-  //     Deep sleep mode for 30 seconds, the ESP8266 wakes up by itself when GPIO 16 (D0 in NodeMCU board) is connected to the RESET pin
-  //     Serial.println("I'm awake, but I'm going into deep sleep mode for 30 seconds");
-  //     ESP.deepSleep(30e6);
 
   currentEpoch = getEpochTime();
-  if (lastSunriseUpdateTime == 0 || currentEpoch - lastSunriseUpdateTime >= 7200)
+  if (lastSunriseUpdateTime == 0 || currentEpoch - lastSunriseUpdateTime >= update_interval_sunrise)
   {
     updateSunriseSunsetTime();
     if (followTheSun)
@@ -383,19 +441,34 @@ void mainLogic()
       closeTime = sunsetTime;
     }
   }
-  if (lastStatusUpdateTime == 0 || currentEpoch - lastStatusUpdateTime >= 20)
-  {
-    sendDoorStatus();
-  }
 
   unsigned int now = currentTime();
-  if (doorIsClosed && openTime > 0 && now >= openTime && now < closeTime)
+  if (openTime > 0 && now >= openTime && now < closeTime)
   {
-    openTheDoor();
+    if (wasOpenedManually)
+    {
+      wasOpenedManually = false;
+    }
+    if (doorIsClosed && !wasClosedManually)
+    {
+      openTheDoor();
+    }
   }
-  else if (!doorIsClosed && closeTime > 0 && (now >= closeTime || now < openTime))
+  else if (closeTime > 0 && (now >= closeTime || now < openTime))
   {
-    closeTheDoor();
+    if (wasClosedManually)
+    {
+      wasClosedManually = false;
+    }
+    if (!doorIsClosed && !wasOpenedManually)
+    {
+      closeTheDoor();
+    }
+  }
+
+  if (lastStatusUpdateTime == 0 || currentEpoch - lastStatusUpdateTime >= update_interval_status)
+  {
+    sendDoorStatus();
   }
 
   delay(500);
@@ -409,9 +482,34 @@ void mainLogic()
     mqttClient.loop();
   }
 
+  // TODO:
+  //  - Deep sleep
+  //     Deep sleep mode for 30 seconds, the ESP8266 wakes up by itself when GPIO 16 (D0 in NodeMCU board) is connected to the RESET pin
+  //     Serial.println("I'm awake, but I'm going into deep sleep mode for 30 seconds");
+  // Serial.println("Deep sleeping 5 minutes");
+  // delay(500);
+  // ESP.deepSleep(300e6); // 5 minutes
+  // ESP.deepSleep(30e6); // 30 seconds
 }
 
-void loop() { 
+void readTime()
+{
+  time(&now);
+  timeinfo = localtime(&now);
+}
+
+void printTime()
+{
+  char timePrintBuffer[80];
+  Serial.print("The time is: ");
+  strftime(timePrintBuffer, 80, "%d %B %Y %H:%M:%S", timeinfo);
+  Serial.println(timePrintBuffer);
+}
+
+void loop()
+{
+  ArduinoOTA.handle();
+  readTime();
   mainLogic();
   // DebugSensors();
   // TestMotors();
