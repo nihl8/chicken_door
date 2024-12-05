@@ -165,6 +165,7 @@ void openTheDoor()
   OpenDoor();
   doorIsClosed = false;
   publishEventMessage(mqtt_topic_status_movement, opened_action_message);
+  lastStatusUpdateTime = 0; // Force status
 }
 
 void closeTheDoor()
@@ -173,6 +174,7 @@ void closeTheDoor()
   CloseDoor();
   doorIsClosed = true;
   publishEventMessage(mqtt_topic_status_movement, closed_action_message);
+  lastStatusUpdateTime = 0; // Force status
 }
 
 void parseIncomingDate(char *payload, unsigned int length, unsigned int *output, const char *openingOrClosing)
