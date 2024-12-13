@@ -24,24 +24,27 @@ char msg[MSG_BUFFER_SIZE];
 
 #define _USE_EEPROM
 
+// Update intervals
+unsigned int update_interval_sunrise = 600;
+unsigned int update_interval_status = 60;
+
 const char *mqtt_topic_config_open = "cfg-open";
 const char *mqtt_topic_config_close = "cfg-close";
 const char *mqtt_topic_config_follow_the_sun = "cfg-fts";
 const char *mqtt_topic_config_save = "cfg-save";
 const char *mqtt_topic_action_operate = "operate";
+const char *mqtt_topic_action_sync = "sync";
 
 const char *mqtt_topic_status = "status";
-const char *mqtt_topic_status_movement = "movement";
-const char *mqtt_topic_error = "error";
+const char *mqtt_topic_status_event = "event";
+const char *mqtt_topic_error = "failure";
 
 const char *opening_label = "opening";
 const char *closing_label = "closing";
 
-const char *opened_action_message = "{\"action\":\"opened\"}";
-const char *closed_action_message = "{\"action\":\"closed\"}";
-
 const char *open_label = "open";
 const char *close_label = "close";
+const char *eeprom_saved_label = "eeprom_saved";
 
 bool doorIsClosed;
 bool wasClosedManually = false;
@@ -58,10 +61,6 @@ PubSubClient mqttClient(wifiClient);
 unsigned long currentEpoch;
 unsigned long lastStatusUpdateTime;
 unsigned long lastSunriseUpdateTime;
-
-// Update intervals
-unsigned int update_interval_sunrise = 7200;
-unsigned int update_interval_status = 60;
 
 // persistant config
 unsigned int openTime = 0;
@@ -144,6 +143,7 @@ bool mqttReconnect()
       mqttClient.subscribe(mqtt_topic_config_open);
       mqttClient.subscribe(mqtt_topic_config_close);
       mqttClient.subscribe(mqtt_topic_action_operate);
+      mqttClient.subscribe(mqtt_topic_action_sync);
       mqttClient.subscribe(mqtt_topic_config_follow_the_sun);
       mqttClient.subscribe(mqtt_topic_config_save);
       return true;
@@ -164,7 +164,7 @@ void openTheDoor()
   Serial.println("Open sesame");
   OpenDoor();
   doorIsClosed = false;
-  publishEventMessage(mqtt_topic_status_movement, opened_action_message);
+  publishEventMessage(open_label);
   lastStatusUpdateTime = 0; // Force status
 }
 
@@ -173,7 +173,7 @@ void closeTheDoor()
   Serial.println("Close sesame");
   CloseDoor();
   doorIsClosed = true;
-  publishEventMessage(mqtt_topic_status_movement, closed_action_message);
+  publishEventMessage(close_label);
   lastStatusUpdateTime = 0; // Force status
 }
 
@@ -227,6 +227,9 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       wasOpenedManually = false;
     }
   }
+  else if (strcmp(topic, mqtt_topic_action_sync) == 0) {
+    lastStatusUpdateTime = 0;
+  }
   else if (strcmp(topic, mqtt_topic_config_follow_the_sun) == 0)
   {
     if (strncmp("{\"follow\":1}", incomingMessagePayload, length) == 0)
@@ -243,28 +246,28 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   else if (strcmp(topic, mqtt_topic_config_save) == 0)
   {
     saveConfigToEEPROM();
+    publishEventMessage(eeprom_saved_label);
   }
-  sendDoorStatus();
+  lastStatusUpdateTime = 0;
 }
 
-void publishEventMessage(const char *topic, const char *action)
+char eventJSONString[1024];
+void publishEventMessage(const char *action)
 {
-  char status[1024];
   JsonDocument doc;
-
   char fmtCurrentTime[6] = "";
 
   formatTime(currentTime(), fmtCurrentTime);
 
   doc["currentTime"] = fmtCurrentTime;
   doc["action"] = action;
-  serializeJson(doc, status, 1024);
-  mqttPublish(topic, status, false);
+  serializeJson(doc, eventJSONString, 1024);
+  mqttPublish(mqtt_topic_status_event, eventJSONString, false);
 }
 
-void publishErrorMessage(const char *topic, const char *error)
+char errorJSONString[2048];
+void publishErrorMessage(const char *error)
 {
-  char status[1024];
   JsonDocument doc;
 
   char fmtCurrentTime[6] = "";
@@ -273,8 +276,8 @@ void publishErrorMessage(const char *topic, const char *error)
 
   doc["currentTime"] = fmtCurrentTime;
   doc["error"] = error;
-  serializeJson(doc, status, 1024);
-  mqttPublish(topic, status, false);
+  serializeJson(doc, errorJSONString, 2048);
+  mqttPublish(mqtt_topic_error, errorJSONString, false);
 }
 
 void mqttPublish(const char *topic, char *payload, boolean retained)
@@ -330,6 +333,16 @@ void loadConfigFromEEPROM()
 
   EEPROM.get(address, followTheSun);
   address += sizeof(followTheSun);
+  
+  if(openTime > 2400 || closeTime > 2400 || sunriseTime > 2400 || sunsetTime > 2400 || followTheSun > 1) {
+    Serial.println("Corrupt EEPROM values, reverting to defaults");
+    openTime = 0;
+    closeTime = 0;
+    sunsetTime = 0;
+    sunriseTime = 0;
+    followTheSun = 1;
+    return; // AndroidOTA must have overwritten something, keep it safe
+  }
 
   Serial.println("Loaded config from EEPROM");
   EEPROM.end();
@@ -349,13 +362,12 @@ void setup()
 
   doorIsClosed = IsDoorFullyClosed();
 
-  EEPROM.begin(EEPROM_SIZE);
   loadConfigFromEEPROM();
 
   wifiSetup();
   timeSetup();
 
-  ArduinoOTA.setHostname(cfg_ota_hostname);
+  // ArduinoOTA.setHostname(cfg_ota_hostname);
   ArduinoOTA.setPassword(cfg_ota_password);
   ArduinoOTA.begin();
 
@@ -404,16 +416,19 @@ void sendDoorStatus()
   lastStatusUpdateTime = getEpochTime();
 }
 
+char errorStr[512];
 void updateSunriseSunsetTime()
 {
   lastSunriseUpdateTime = currentEpoch;
   Serial.print("lastSunriseUpdateTime: ");
   Serial.println(lastSunriseUpdateTime);
 
-  if (QuerySunriseAndSunset(wifiClient, cfg_geo_lat, cfg_geo_lon, &sunriseTime, &sunsetTime) != 0)
+  unsigned int sunriseExitCode = QuerySunriseAndSunset(wifiClient, cfg_geo_lat, cfg_geo_lon, &sunriseTime, &sunsetTime);
+  if (sunriseExitCode != 0)
   {
-    Serial.println("[SUNRISE] Error: Could not update sunrise/sunset");
-    publishErrorMessage(mqtt_topic_error, "Could not update sunrise/sunset");
+    Serial.printf("[SUNRISE] Error: Could not update sunrise/sunset: error %d\n", sunriseExitCode);
+    sprintf(errorStr, "Sunrise sunset error %d", sunriseExitCode);
+    publishErrorMessage(errorStr);
   }
   else
   {
@@ -444,7 +459,6 @@ void mainLogic()
       closeTime = sunsetTime;
     }
   }
-
   unsigned int now = currentTime();
   if (openTime > 0 && now >= openTime && now < closeTime)
   {
@@ -473,13 +487,13 @@ void mainLogic()
   {
     sendDoorStatus();
   }
-
-  delay(2000);
+  delay(1000);
 
   if (!mqttClient.connected())
   {
     mqttReconnect();
   }
+
   if (mqttClient.connected())
   {
     mqttClient.loop();

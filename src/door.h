@@ -69,7 +69,7 @@ void doorStop()
 
 void OpenDoor()
 {
-  blink(2);
+  blinkVeryFast(2);
   if (IsDoorFullyOpen())
   {
     return;
@@ -89,7 +89,7 @@ void OpenDoor()
 // Logic
 void CloseDoor()
 {
-  blink(3);
+  blinkVeryFast(1);
   if (IsDoorFullyClosed())
   {
     return;

@@ -33,6 +33,13 @@ int extractSunriseSunsetFromResponse(String responseBody, unsigned int *sunrise,
         Serial.printf("[SUNRISE] deserializeJson() failed: %s\n", error.c_str());
         return 3;
     }
+    if(!doc["results"].is<JsonObject>() ||
+        !doc["results"]["sunrise"].is<const char*>() ||
+        !doc["results"]["sunset"].is<const char*>()
+    ) {
+        Serial.printf("[SUNRISE] JSON structure is wrong: %s\n", responseBody.c_str());
+        return 4;
+    }
 
     const char *sunriseText = doc["results"]["sunrise"];
     const char *sunsetText = doc["results"]["sunset"];
@@ -42,7 +49,7 @@ int extractSunriseSunsetFromResponse(String responseBody, unsigned int *sunrise,
     if (sunriseInt == 0 || sunsetInt == 0)
     {
         Serial.printf("[SUNRISE] Failure parsing sunrise (%s) or sunset (%s) time...\n", sunriseText, sunsetText);
-        return 4;
+        return 5;
     }
     *sunrise = sunriseInt;
     *sunset = sunsetInt;
